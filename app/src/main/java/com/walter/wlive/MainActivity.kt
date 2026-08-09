@@ -189,7 +189,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val recorder = Recorder.Builder()
-            .setQualitySelector(QualitySelector.from(mode.quality))
+            .setQualitySelector(QualitySelector.from(Quality.HD))
+            .setTargetVideoEncodingBitRate(mode.videoBitrateBps)
             .build()
 
         videoCapture = VideoCapture.withOutput(recorder)
@@ -251,7 +252,8 @@ class MainActivity : ComponentActivity() {
                         viewButton.isEnabled = lastFile != null
                         saveButton.isEnabled = lastFile != null
                         stats.text = buildString {
-                            append("WLive v0.3.0 • ${mode.label}\n")
+                            append("WLive v0.4.0 • ${mode.label}\n")
+                            append("720p • objetivo ${mode.targetKbps} kbps\n")
                             append("Prueba finalizada\n")
                             append(String.format(Locale.US, "Archivo: %.2f MB\n", finalBytes / 1_048_576.0))
                             append(String.format(Locale.US, "Bitrate medio real: %.0f kbps\n", avgKbps))
@@ -324,7 +326,7 @@ class MainActivity : ComponentActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             if (intent.resolveActivity(packageManager) != null) {
-                // Queda disponible en Galería; no lo abrimos automáticamente.
+                // Disponible en Galería.
             }
         } catch (e: Exception) {
             contentResolver.delete(uri, null, null)
@@ -340,8 +342,8 @@ class MainActivity : ComponentActivity() {
         val mb = bytes / 1_048_576.0
 
         stats.text = buildString {
-            append("WLive v0.3.0 • ${mode.label}\n")
-            append("${mode.target} • GRABANDO\n")
+            append("WLive v0.4.0 • ${mode.label}\n")
+            append("720p • objetivo ${mode.targetKbps} kbps • GRABANDO\n")
             append(String.format(Locale.US, "Datos generados: %.2f MB\n", mb))
             append(String.format(Locale.US, "Bitrate medio real: %.0f kbps\n", avgKbps))
             append(String.format(Locale.US, "Tiempo: %.1f s", elapsed))
@@ -349,15 +351,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun idleStatusText(): String =
-        "WLive v0.3.0 • ${mode.label}\n${mode.target}\nMismo encuadre en los tres modos"
+        "WLive v0.4.0 • ${mode.label}\n720p en los tres modos\nObjetivo de video: ${mode.targetKbps} kbps\nMismo encuadre, distinta compresión"
 }
 
 enum class StreamMode(
     val label: String,
-    val target: String,
-    val quality: Quality
+    val targetKbps: Int,
+    val videoBitrateBps: Int
 ) {
-    QUALITY("CALIDAD", "Objetivo: 1080p", Quality.FHD),
-    SAVING("AHORRO", "Objetivo: 720p", Quality.HD),
-    ULTRA("ULTRA AHORRO", "Objetivo: 480p", Quality.SD)
+    QUALITY("CALIDAD", 4000, 4_000_000),
+    SAVING("AHORRO", 2000, 2_000_000),
+    ULTRA("ULTRA AHORRO", 900, 900_000)
 }
