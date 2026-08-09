@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var testButton: Button
     private lateinit var viewButton: Button
     private lateinit var saveButton: Button
+    private lateinit var resultsButton: Button
 
     private var mode = StreamMode.SAVING
     private var cameraProvider: ProcessCameraProvider? = null
@@ -51,7 +52,9 @@ class MainActivity : ComponentActivity() {
     private var recording: Recording? = null
     private var currentFile: File? = null
     private var lastFile: File? = null
+    private var lastMode: StreamMode? = null
     private var startedAtMs = 0L
+    private val results = linkedMapOf<StreamMode, TestResult>()
     private val handler = Handler(Looper.getMainLooper())
 
     private val statsTicker = object : Runnable {
@@ -63,20 +66,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val cameraPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) startCamera() else stats.text = "Se necesita permiso de cámara"
+    private val permissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions[Manifest.permission.CAMERA] == true || hasCameraPermission()) {
+            startCamera()
+            if (!hasAudioPermission()) {
+                Toast.makeText(this, "Micrófono no autorizado: las pruebas quedarán sin sonido", Toast.LENGTH_LONG).show()
+            }
+        } else {
+            stats.text = "Se necesita permiso de cámara"
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            startCamera()
-        } else {
-            cameraPermission.launch(Manifest.permission.CAMERA)
-        }
+        requestNeededPermissions()
     }
 
     override fun onDestroy() {
@@ -85,6 +91,24 @@ class MainActivity : ComponentActivity() {
         recording = null
         super.onDestroy()
     }
+
+    private fun requestNeededPermissions() {
+        val needed = mutableListOf<String>()
+        if (!hasCameraPermission()) needed += Manifest.permission.CAMERA
+        if (!hasAudioPermission()) needed += Manifest.permission.RECORD_AUDIO
+
+        if (needed.isEmpty()) {
+            startCamera()
+        } else {
+            permissionsLauncher.launch(needed.toTypedArray())
+        }
+    }
+
+    private fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     private fun buildUi() {
         val root = FrameLayout(this)
@@ -100,12 +124,12 @@ class MainActivity : ComponentActivity() {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(32, 24, 32, 40)
+            setPadding(32, 20, 32, 32)
             setBackgroundColor(0xAA000000.toInt())
         }
 
         stats = TextView(this).apply {
-            textSize = 17f
+            textSize = 16f
             setTextColor(0xFFFFFFFF.toInt())
             text = idleStatusText()
             gravity = Gravity.CENTER
@@ -142,6 +166,13 @@ class MainActivity : ComponentActivity() {
         }
         panel.addView(testButton)
 
+        resultsButton = Button(this).apply {
+            text = "RESULTADOS (${results.size}/3)"
+            isEnabled = false
+            setOnClickListener { showResultsDialog() }
+        }
+        panel.addView(resultsButton)
+
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -173,6 +204,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startCamera() {
+        if (!hasCameraPermission()) return
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             cameraProvider = future.get()
@@ -224,15 +256,21 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        val file = File(cacheDir, "wlive-${mode.name.lowercase()}-${System.currentTimeMillis()}.mp4")
+        val testMode = mode
+        val file = File(cacheDir, "wlive-${testMode.name.lowercase()}-${System.currentTimeMillis()}.mp4")
         currentFile = file
         startedAtMs = System.currentTimeMillis()
         viewButton.isEnabled = false
         saveButton.isEnabled = false
 
         val output = FileOutputOptions.Builder(file).build()
-        recording = capture.output
-            .prepareRecording(this, output)
+        var pendingRecording = capture.output.prepareRecording(this, output)
+        val audioEnabled = hasAudioPermission()
+        if (audioEnabled) {
+            pendingRecording = pendingRecording.withAudioEnabled()
+        }
+
+        recording = pendingRecording
             .start(ContextCompat.getMainExecutor(this)) { event ->
                 when (event) {
                     is VideoRecordEvent.Start -> {
@@ -246,19 +284,21 @@ class MainActivity : ComponentActivity() {
                         val finalBytes = file.length()
                         val elapsed = ((System.currentTimeMillis() - startedAtMs).coerceAtLeast(1L)) / 1000.0
                         val avgKbps = (finalBytes * 8.0 / 1000.0) / elapsed
+                        val result = TestResult(testMode, finalBytes, elapsed, avgKbps, audioEnabled)
+                        results[testMode] = result
+
                         recording = null
                         lastFile = file.takeIf { it.exists() && it.length() > 0 }
+                        lastMode = testMode
                         testButton.text = "INICIAR PRUEBA"
                         viewButton.isEnabled = lastFile != null
                         saveButton.isEnabled = lastFile != null
-                        stats.text = buildString {
-                            append("WLive v0.4.0 • ${mode.label}\n")
-                            append("720p • objetivo ${mode.targetKbps} kbps\n")
-                            append("Prueba finalizada\n")
-                            append(String.format(Locale.US, "Archivo: %.2f MB\n", finalBytes / 1_048_576.0))
-                            append(String.format(Locale.US, "Bitrate medio real: %.0f kbps\n", avgKbps))
-                            append(String.format(Locale.US, "Duración: %.1f s\n", elapsed))
-                            append("Podés VER o GUARDAR esta prueba")
+                        resultsButton.isEnabled = results.isNotEmpty()
+                        resultsButton.text = "RESULTADOS (${results.size}/3)"
+                        stats.text = finalResultText(result)
+
+                        if (results.size == StreamMode.entries.size) {
+                            showResultsDialog()
                         }
                     }
                 }
@@ -269,8 +309,79 @@ class MainActivity : ComponentActivity() {
         recording?.stop()
     }
 
+    private fun finalResultText(result: TestResult): String {
+        val quality = results[StreamMode.QUALITY]
+        val savings = if (quality != null && result.mode != StreamMode.QUALITY && quality.avgKbps > 0) {
+            ((1.0 - result.avgKbps / quality.avgKbps) * 100.0)
+        } else null
+
+        return buildString {
+            append("WLive v0.5.0 • ${result.mode.label}\n")
+            append("720p • objetivo ${result.mode.targetKbps} kbps\n")
+            append(String.format(Locale.US, "Archivo real: %.2f MB en %.1f s\n", result.mb, result.seconds))
+            append(String.format(Locale.US, "Bitrate real: %.0f kbps\n", result.avgKbps))
+            append(String.format(Locale.US, "Consumo normalizado: %.2f MB/min\n", result.mbPerMinute))
+            append("Audio: ${if (result.audioEnabled) "SÍ" else "NO"}\n")
+            if (savings != null) {
+                append(String.format(Locale.US, "AHORRO vs Calidad: %.1f%%", savings.coerceIn(-999.0, 100.0)))
+            } else if (result.mode == StreamMode.QUALITY) {
+                append("Referencia guardada para comparar")
+            } else {
+                append("Hacé una prueba en Calidad para calcular el ahorro")
+            }
+        }
+    }
+
+    private fun showResultsDialog() {
+        if (results.isEmpty()) return
+        val quality = results[StreamMode.QUALITY]
+        val text = buildString {
+            append("COMPARACIÓN WLive v0.5.0\n")
+            append("Todos los modos: 720p\n\n")
+            StreamMode.entries.forEach { streamMode ->
+                val result = results[streamMode]
+                if (result == null) {
+                    append("${streamMode.label}: pendiente\n\n")
+                } else {
+                    append("${streamMode.label}\n")
+                    append(String.format(Locale.US, "  %.2f MB/min • %.0f kbps", result.mbPerMinute, result.avgKbps))
+                    if (quality != null && streamMode != StreamMode.QUALITY && quality.avgKbps > 0) {
+                        val savings = (1.0 - result.avgKbps / quality.avgKbps) * 100.0
+                        append(String.format(Locale.US, " • ahorro %.1f%%", savings.coerceIn(-999.0, 100.0)))
+                    }
+                    append("\n\n")
+                }
+            }
+            if (results.size == StreamMode.entries.size && quality != null) {
+                val best = results.values.minByOrNull { it.avgKbps }
+                if (best != null) {
+                    val bestSavings = (1.0 - best.avgKbps / quality.avgKbps) * 100.0
+                    append("EVALUACIÓN\n")
+                    append("Menor consumo: ${best.mode.label}\n")
+                    if (best.mode != StreamMode.QUALITY) {
+                        append(String.format(Locale.US, "Reduce aprox. %.1f%% de datos frente a Calidad.\n", bestSavings.coerceIn(-999.0, 100.0)))
+                    }
+                    append("Compará visualmente VER ÚLTIMA para decidir si la calidad sigue siendo aceptable.")
+                }
+            }
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Resultados de pruebas")
+            .setMessage(text)
+            .setPositiveButton("CERRAR", null)
+            .setNeutralButton("REINICIAR") { _, _ ->
+                results.clear()
+                resultsButton.text = "RESULTADOS (0/3)"
+                resultsButton.isEnabled = false
+                stats.text = idleStatusText()
+            }
+            .show()
+    }
+
     private fun showLastVideo() {
         val file = lastFile ?: return
+        val savedMode = lastMode ?: mode
         val videoView = VideoView(this).apply {
             setVideoPath(file.absolutePath)
             val controller = MediaController(this@MainActivity)
@@ -281,7 +392,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         AlertDialog.Builder(this)
-            .setTitle("Última prueba • ${mode.label}")
+            .setTitle("Última prueba • ${savedMode.label}")
             .setView(videoView)
             .setPositiveButton("CERRAR", null)
             .setOnDismissListener { videoView.stopPlayback() }
@@ -294,12 +405,13 @@ class MainActivity : ComponentActivity() {
 
     private fun saveLastVideo() {
         val file = lastFile ?: return
+        val savedMode = lastMode ?: mode
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             Toast.makeText(this, "Guardar en Galería requiere Android 10 o superior en esta versión", Toast.LENGTH_LONG).show()
             return
         }
 
-        val name = "WLive_${mode.name}_${System.currentTimeMillis()}.mp4"
+        val name = "WLive_${savedMode.name}_${System.currentTimeMillis()}.mp4"
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
@@ -342,16 +454,28 @@ class MainActivity : ComponentActivity() {
         val mb = bytes / 1_048_576.0
 
         stats.text = buildString {
-            append("WLive v0.4.0 • ${mode.label}\n")
+            append("WLive v0.5.0 • ${mode.label}\n")
             append("720p • objetivo ${mode.targetKbps} kbps • GRABANDO\n")
-            append(String.format(Locale.US, "Datos generados: %.2f MB\n", mb))
-            append(String.format(Locale.US, "Bitrate medio real: %.0f kbps\n", avgKbps))
-            append(String.format(Locale.US, "Tiempo: %.1f s", elapsed))
+            append(String.format(Locale.US, "Datos: %.2f MB\n", mb))
+            append(String.format(Locale.US, "Bitrate real: %.0f kbps\n", avgKbps))
+            append(String.format(Locale.US, "Tiempo: %.1f s\n", elapsed))
+            append("Audio: ${if (hasAudioPermission()) "SÍ" else "NO"}")
         }
     }
 
     private fun idleStatusText(): String =
-        "WLive v0.4.0 • ${mode.label}\n720p en los tres modos\nObjetivo de video: ${mode.targetKbps} kbps\nMismo encuadre, distinta compresión"
+        "WLive v0.5.0 • ${mode.label}\n720p • objetivo ${mode.targetKbps} kbps\nAudio: ${if (hasAudioPermission()) "SÍ" else "NO"}\nLa app compara automáticamente las pruebas"
+}
+
+data class TestResult(
+    val mode: StreamMode,
+    val bytes: Long,
+    val seconds: Double,
+    val avgKbps: Double,
+    val audioEnabled: Boolean
+) {
+    val mb: Double get() = bytes / 1_048_576.0
+    val mbPerMinute: Double get() = (avgKbps * 1000.0 / 8.0 * 60.0) / 1_048_576.0
 }
 
 enum class StreamMode(
