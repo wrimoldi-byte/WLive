@@ -55,6 +55,8 @@ class MainActivity : ComponentActivity() {
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var cameraId: String? = null
+    private var sensorOrientation = 0
+    private var lensFacing = CameraCharacteristics.LENS_FACING_FRONT
     private var recorder: DirectH264Recorder? = null
     private var currentFile: File? = null
     private var lastFile: File? = null
@@ -217,6 +219,10 @@ class MainActivity : ComponentActivity() {
                 manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
             } ?: manager.cameraIdList.firstOrNull() ?: return
             cameraId = id
+            val characteristics = manager.getCameraCharacteristics(id)
+            sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING) ?: CameraCharacteristics.LENS_FACING_FRONT
+            configureTransform(textureView.width, textureView.height)
             manager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
@@ -258,18 +264,39 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun displayRotationDegrees(): Int = when (display?.rotation ?: Surface.ROTATION_0) {
+        Surface.ROTATION_90 -> 90
+        Surface.ROTATION_180 -> 180
+        Surface.ROTATION_270 -> 270
+        else -> 0
+    }
+
+    private fun videoOrientationHint(): Int {
+        val deviceDegrees = displayRotationDegrees()
+        return if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+            (sensorOrientation + deviceDegrees) % 360
+        } else {
+            (sensorOrientation - deviceDegrees + 360) % 360
+        }
+    }
+
     private fun configureTransform(viewWidth: Int, viewHeight: Int) {
         if (viewWidth == 0 || viewHeight == 0) return
+        val rotation = videoOrientationHint()
         val matrix = Matrix()
         val viewRect = RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
-        val bufferRect = RectF(0f, 0f, 720f, 1280f)
+        val rotated = rotation == 90 || rotation == 270
+        val bufferRect = if (rotated) RectF(0f, 0f, 720f, 1280f) else RectF(0f, 0f, 1280f, 720f)
         val centerX = viewRect.centerX()
         val centerY = viewRect.centerY()
         bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
         matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-        val scale = maxOf(viewHeight / 720f, viewWidth / 1280f)
+        val scale = maxOf(viewWidth / bufferRect.width(), viewHeight / bufferRect.height())
         matrix.postScale(scale, scale, centerX, centerY)
-        matrix.postRotate(90f, centerX, centerY)
+        matrix.postRotate(rotation.toFloat(), centerX, centerY)
+        if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+            matrix.postScale(-1f, 1f, centerX, centerY)
+        }
         textureView.setTransform(matrix)
     }
 
@@ -289,6 +316,7 @@ class MainActivity : ComponentActivity() {
             outputFile = finalFile,
             bitrate = testMode.videoBitrateBps,
             audioEnabled = hasAudioPermission(),
+            orientationHint = videoOrientationHint(),
             onError = { message -> runOnUiThread { stats.text = message; testButton.isEnabled = true } }
         )
 
@@ -373,7 +401,7 @@ class MainActivity : ComponentActivity() {
             (1.0 - result.avgKbps / quality.avgKbps) * 100.0
         } else null
         return buildString {
-            append("WLive v0.6.0 • ${result.mode.label}\n")
+            append("WLive v0.6.1 • ${result.mode.label}\n")
             append("MediaCodec H.264 • 720p • objetivo ${result.mode.targetKbps} kbps\n")
             append(String.format(Locale.US, "Video real: %.0f kbps\n", result.videoKbps))
             append(String.format(Locale.US, "Total archivo: %.2f MB en %.1f s • %.0f kbps\n", result.mb, result.seconds, result.avgKbps))
@@ -389,7 +417,7 @@ class MainActivity : ComponentActivity() {
         if (results.isEmpty()) return
         val quality = results[StreamMode.QUALITY]
         val text = buildString {
-            append("COMPARACIÓN WLive v0.6.0\nMediaCodec H.264 • todos 720p\n\n")
+            append("COMPARACIÓN WLive v0.6.1\nMediaCodec H.264 • todos 720p\n\n")
             StreamMode.entries.forEach { m ->
                 val r = results[m]
                 if (r == null) append("${m.label}: pendiente\n\n") else {
@@ -408,7 +436,7 @@ class MainActivity : ComponentActivity() {
                     val s = (1.0 - best.avgKbps / quality.avgKbps) * 100.0
                     append("EVALUACIÓN\nMenor consumo: ${best.mode.label}\n")
                     if (best.mode != StreamMode.QUALITY) append(String.format(Locale.US, "Reduce aprox. %.1f%% frente a Calidad.\n", s.coerceIn(-999.0, 100.0)))
-                    append("Ahora el bitrate de video sale del encoder MediaCodec, no del Recorder de CameraX.")
+                    append("MediaCodec controla directamente el bitrate; vista previa corregida para cámara frontal.")
                 }
             }
         }
@@ -460,7 +488,7 @@ class MainActivity : ComponentActivity() {
         val bytes = active.currentBytes()
         val kbps = (bytes * 8.0 / 1000.0) / elapsed
         stats.text = buildString {
-            append("WLive v0.6.0 • ${mode.label}\n")
+            append("WLive v0.6.1 • ${mode.label}\n")
             append("MediaCodec H.264 • 720p • objetivo ${mode.targetKbps} kbps • GRABANDO\n")
             append(String.format(Locale.US, "Datos generados: %.2f MB\n", bytes / 1_048_576.0))
             append(String.format(Locale.US, "Bitrate total aprox.: %.0f kbps\n", kbps))
@@ -469,7 +497,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun idleStatusText(): String =
-        "WLive v0.6.0 • ${mode.label}\nMediaCodec H.264 • 720p\nBitrate fijado: ${mode.targetKbps} kbps\nAudio + evaluación automática"
+        "WLive v0.6.1 • ${mode.label}\nMediaCodec H.264 • 720p\nBitrate fijado: ${mode.targetKbps} kbps\nCámara frontal vertical + espejo selfie"
 
     private fun closeCamera() {
         try { captureSession?.close() } catch (_: Exception) {}
@@ -483,6 +511,7 @@ class DirectH264Recorder(
     private val outputFile: File,
     private val bitrate: Int,
     val audioEnabled: Boolean,
+    private val orientationHint: Int,
     private val onError: (String) -> Unit
 ) {
     private val width = 1280
@@ -513,7 +542,9 @@ class DirectH264Recorder(
             configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             encoderSurface = createInputSurface()
         }
-        videoMuxer = MediaMuxer(videoTemp.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        videoMuxer = MediaMuxer(videoTemp.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).apply {
+            setOrientationHint(orientationHint)
+        }
 
         if (audioEnabled) {
             audioRecorder = MediaRecorder().apply {
@@ -621,6 +652,7 @@ class DirectH264Recorder(
         val audioExtractor = MediaExtractor().apply { setDataSource(audio.absolutePath) }
         val muxer = MediaMuxer(out.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         try {
+            muxer.setOrientationHint(orientationHint)
             val videoTrackSrc = (0 until videoExtractor.trackCount).first { videoExtractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true }
             val audioTrackSrc = (0 until audioExtractor.trackCount).first { audioExtractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true }
             videoExtractor.selectTrack(videoTrackSrc)
